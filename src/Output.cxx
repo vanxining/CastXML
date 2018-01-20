@@ -14,6 +14,12 @@
   limitations under the License.
 */
 
+#define DEMANGLE 1
+
+#if DEMANGLE
+#pragma warning (disable: 4141 4146 4244 4291 4477 4624 4800)
+#endif
+
 #include "Output.h"
 #include "Options.h"
 #include "Utils.h"
@@ -391,6 +397,18 @@ class ASTVisitor : public ASTVisitorBase
 
   /** Print a name="..." attribute.  */
   void PrintNameAttribute(std::string const& name);
+
+#if DEMANGLE
+  /** Print a final="..." attribute.  */
+  void PrintFinalAttribute(clang::Decl const* d);
+
+  /** Print a demangled="..." attribute.  */
+  void PrintDemangledAttribute(clang::NamedDecl const* d);
+
+  /** Print a demangled="..." attribute for a function.  */
+  void PrintFunctionDemangledAttribute(clang::NamedDecl const* d,
+                                       clang::FunctionProtoType const* fpt);
+#endif
 
   /** Print a mangled="..." attribute.  */
   void PrintMangledAttribute(clang::NamedDecl const* d);
@@ -1173,6 +1191,54 @@ void ASTVisitor::PrintNameAttribute(std::string const& name)
   this->OS << " name=\"" << encodeXML(n) << "\"";
 }
 
+#if DEMANGLE
+void ASTVisitor::PrintFinalAttribute(clang::Decl const* d)
+{
+  if (d->getAttr<clang::FinalAttr>()) {
+    this->OS << " final=\"1\"";
+  }
+}
+
+void ASTVisitor::PrintDemangledAttribute(clang::NamedDecl const* d)
+{
+  std::string s;
+  {
+    llvm::raw_string_ostream rso(s);
+    d->getNameForDiagnostic(rso, this->PrintingPolicy, true);
+  }
+
+  this->OS << " demangled=\"" << encodeXML(s) << "\"";
+}
+
+void ASTVisitor::PrintFunctionDemangledAttribute(
+  clang::NamedDecl const* d, clang::FunctionProtoType const* fpt)
+{
+  std::string s;
+  llvm::raw_string_ostream rso(s);
+
+  d->getNameForDiagnostic(rso, this->PrintingPolicy, true);
+  rso << '(';
+
+  if (fpt->getNumParams() > 0) {
+    auto i(fpt->param_type_begin()), e(fpt->param_type_end());
+    for (; i != e; ++i) {
+      rso << i->getAsString(this->PrintingPolicy);
+
+      if (i + 1 != e) {
+        rso << ", ";
+      }
+    }
+  }
+
+  rso << ')';
+  if (fpt->isConst()) {
+    rso << " const";
+  }
+
+  this->OS << " demangled=\"" << encodeXML(rso.str()) << '"';
+}
+#endif
+
 void ASTVisitor::PrintMangledAttribute(clang::NamedDecl const* d)
 {
   // Compute the mangled name.
@@ -1531,7 +1597,17 @@ void ASTVisitor::OutputFunctionHelper(clang::FunctionDecl const* d,
   this->OS << "  <" << tag;
   this->PrintIdAttribute(dn);
   if (name) {
+#if DEMANGLE
+    // Print the diagnostic name (e.g. "~dtor" for an destructor
+    // instead of "dtor".)
+    std::string diag;
+    llvm::raw_string_ostream rso(diag);
+    d->getNameForDiagnostic(rso, this->PrintingPolicy, false);
+    rso.flush();
+    this->PrintNameAttribute(diag);
+#else
     this->PrintNameAttribute(name.getValue());
+#endif
   }
   if (flags & FH_Returns) {
     this->PrintReturnsAttribute(d->getReturnType(), dn->Complete);
@@ -1550,6 +1626,9 @@ void ASTVisitor::OutputFunctionHelper(clang::FunctionDecl const* d,
   }
   if (flags & FH_Virtual) {
     this->OS << " virtual=\"1\"";
+#if DEMANGLE
+    this->PrintFinalAttribute(d);
+#endif
   }
   if (flags & FH_Pure) {
     this->OS << " pure_virtual=\"1\"";
@@ -1592,6 +1671,11 @@ void ASTVisitor::OutputFunctionHelper(clang::FunctionDecl const* d,
       this->PrintMangledAttribute(d);
     }
     this->GetFunctionTypeAttributes(fpt, attributes);
+#if DEMANGLE
+    if (name) {
+      this->PrintFunctionDemangledAttribute(d, fpt);
+    }
+#endif
   }
 
   this->GetDeclAttributes(d, attributes);
@@ -1691,6 +1775,9 @@ void ASTVisitor::OutputTranslationUnitDecl(clang::TranslationUnitDecl const* d,
   this->OS << "  <Namespace";
   this->PrintIdAttribute(dn);
   this->PrintNameAttribute("::");
+#if DEMANGLE
+  this->OS << " demangled=\"::\"";
+#endif
   if (dn->Complete) {
     this->PrintMembersAttribute(d);
   }
@@ -1705,6 +1792,9 @@ void ASTVisitor::OutputNamespaceDecl(clang::NamespaceDecl const* d,
   std::string name = d->getName().str();
   if (!name.empty()) {
     this->PrintNameAttribute(name);
+#if DEMANGLE
+    this->PrintDemangledAttribute(d);
+#endif
   }
   this->PrintContextAttribute(d);
   if (dn->Complete) {
@@ -1746,6 +1836,9 @@ void ASTVisitor::OutputRecordDecl(clang::RecordDecl const* d,
     llvm::raw_string_ostream rso(s);
     d->getNameForDiagnostic(rso, this->PrintingPolicy, false);
     this->PrintNameAttribute(rso.str());
+#if DEMANGLE
+    this->PrintDemangledAttribute(d);
+#endif
   }
   clang::AccessSpecifier access = clang::AS_none;
   if (clang::ClassTemplateSpecializationDecl const* dxts =
@@ -1769,6 +1862,9 @@ void ASTVisitor::OutputRecordDecl(clang::RecordDecl const* d,
         this->PrintBasesAttribute(dx);
       }
       this->PrintBefriendingAttribute(dx);
+#if DEMANGLE
+      this->PrintFinalAttribute(d);
+#endif
     }
   } else {
     this->OS << " incomplete=\"1\"";
@@ -1873,6 +1969,11 @@ void ASTVisitor::OutputEnumDecl(clang::EnumDecl const* d, DumpNode const* dn)
   this->PrintLocationAttribute(d);
   this->PrintABIAttributes(d);
   this->PrintAttributesAttribute(d);
+#if DEMANGLE
+  if (d->isScoped()) {
+    this->OS << " scoped=\"1\"";
+  }
+#endif
   clang::EnumDecl::enumerator_iterator enum_begin = d->enumerator_begin();
   clang::EnumDecl::enumerator_iterator enum_end = d->enumerator_end();
   if (enum_begin != enum_end) {
@@ -1938,6 +2039,9 @@ void ASTVisitor::OutputVarDecl(clang::VarDecl const* d, DumpNode const* dn)
   }
   this->PrintMangledAttribute(d);
   this->PrintAttributesAttribute(d);
+#if DEMANGLE
+  this->PrintDemangledAttribute(d);
+#endif
 
   this->OS << "/>\n";
 }
